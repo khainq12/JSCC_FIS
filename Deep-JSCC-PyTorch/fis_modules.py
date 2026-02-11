@@ -1,159 +1,128 @@
 """
-FIS Modules for Deep JSCC
-STABLE VERSION (NaN-safe, overflow-safe)
+Differentiable FIS Modules for Deep JSCC
+Author: Modified for research-grade integration
 """
 
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
+import math
 
 
-# ============================================================
-# FIS Layer 1: Importance Assessment
-# ============================================================
+# ==========================================================
+# 1️⃣ Importance Assessment (Differentiable FIS Style)
+# ==========================================================
 
 class FIS_ImportanceAssessment(nn.Module):
+    """
+    Differentiable fuzzy-style importance estimator
 
-    def __init__(self):
+    Input:  (B, C, H, W)
+    Output: (B, H, W) importance ∈ [0,1]
+    """
+
+    def __init__(self, channels):
         super().__init__()
 
-        try:
-            import skfuzzy as fuzz
-            from skfuzzy import control as ctrl
-            self.use_fuzzy = True
-            self._setup_fuzzy_system()
-            print("FIS Layer 1: Using fuzzy inference system")
-        except ImportError:
-            print("Warning: scikit-fuzzy not installed. Using NN approximation.")
-            self.use_fuzzy = False
-            self._setup_nn_approximation()
+        self.channels = channels
 
-    def _setup_fuzzy_system(self):
-        import skfuzzy as fuzz
-        from skfuzzy import control as ctrl
-
-        self.magnitude = ctrl.Antecedent(np.arange(0, 1.01, 0.01), 'magnitude')
-        self.variance = ctrl.Antecedent(np.arange(0, 1.01, 0.01), 'variance')
-        self.gradient = ctrl.Antecedent(np.arange(0, 1.01, 0.01), 'gradient')
-        self.importance = ctrl.Consequent(np.arange(0, 1.01, 0.01), 'importance')
-
-        for var in [self.magnitude, self.variance, self.gradient]:
-            var['low'] = fuzz.trimf(var.universe, [0, 0, 0.4])
-            var['medium'] = fuzz.trimf(var.universe, [0.3, 0.5, 0.7])
-            var['high'] = fuzz.trimf(var.universe, [0.6, 1, 1])
-
-        self.importance['very_low'] = fuzz.trimf(self.importance.universe, [0, 0, 0.25])
-        self.importance['low'] = fuzz.trimf(self.importance.universe, [0.15, 0.35, 0.5])
-        self.importance['medium'] = fuzz.trimf(self.importance.universe, [0.4, 0.5, 0.6])
-        self.importance['high'] = fuzz.trimf(self.importance.universe, [0.5, 0.7, 0.85])
-        self.importance['very_high'] = fuzz.trimf(self.importance.universe, [0.75, 1, 1])
-
-        self.rules = [
-            ctrl.Rule(self.magnitude['high'] & self.variance['high'],
-                      self.importance['very_high']),
-            ctrl.Rule(self.gradient['high'],
-                      self.importance['high']),
-            ctrl.Rule(self.magnitude['low'] & self.variance['low'],
-                      self.importance['very_low']),
-            ctrl.Rule(self.magnitude['medium'] & self.variance['medium'],
-                      self.importance['medium']),
-        ]
-
-        self.ctrl_system = ctrl.ControlSystem(self.rules)
-        self.simulation = ctrl.ControlSystemSimulation(self.ctrl_system)
-
-    def _setup_nn_approximation(self):
-        self.nn_approx = nn.Sequential(
-            nn.Linear(3, 16),
+        # Learnable fuzzy fusion
+        self.fusion = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=1),
             nn.ReLU(),
-            nn.Linear(16, 1),
+            nn.Conv2d(16, 1, kernel_size=1),
             nn.Sigmoid()
         )
 
     def forward(self, features):
-
         B, C, H, W = features.shape
-        importance_map = torch.zeros(B, H, W, device=features.device)
 
-        if self.use_fuzzy:
-            features_np = features.detach().cpu().numpy()
+        # ----- Descriptors -----
+        mag = torch.norm(features, dim=1, keepdim=True) / math.sqrt(C)
+        var = torch.var(features, dim=1, keepdim=True)
+        std = torch.std(features, dim=1, keepdim=True)
 
-            for b in range(B):
-                for i in range(H):
-                    for j in range(W):
+        # Normalize
+        var = var / (torch.mean(features ** 2, dim=1, keepdim=True) + 1e-6)
+        std = std / (torch.mean(torch.abs(features), dim=1, keepdim=True) + 1e-6)
 
-                        f_ij = features_np[b, :, i, j]
+        mag = torch.clamp(mag, 0, 1)
+        var = torch.clamp(var, 0, 1)
+        std = torch.clamp(std, 0, 1)
 
-                        mag = np.linalg.norm(f_ij) / np.sqrt(C)
-                        var = np.var(f_ij)
-                        grad = np.std(f_ij)
+        fuzzy_input = torch.cat([mag, var, std], dim=1)
 
-                        mag = np.clip(mag, 0, 1)
-                        var = np.clip(var, 0, 1)
-                        grad = np.clip(grad, 0, 1)
+        importance = self.fusion(fuzzy_input)
 
-                        try:
-                            self.simulation.input['magnitude'] = float(mag)
-                            self.simulation.input['variance'] = float(var)
-                            self.simulation.input['gradient'] = float(grad)
-                            self.simulation.compute()
-                            importance = self.simulation.output['importance']
-                        except:
-                            importance = 0.4 * mag + 0.3 * var + 0.3 * grad
-
-                        importance_map[b, i, j] = importance
-        else:
-            for b in range(B):
-                for i in range(H):
-                    for j in range(W):
-
-                        f_ij = features[b, :, i, j]
-
-                        mag = torch.norm(f_ij) / np.sqrt(C)
-                        var = torch.var(f_ij)
-                        grad = torch.std(f_ij)
-
-                        mag = torch.clamp(mag, 0, 1)
-                        var = torch.clamp(var, 0, 1)
-                        grad = torch.clamp(grad, 0, 1)
-
-                        input_vec = torch.stack([mag, var, grad]).unsqueeze(0)
-                        importance = self.nn_approx(input_vec).squeeze()
-
-                        importance_map[b, i, j] = importance
-
-        # 🔥 SAFETY
-        importance_map = torch.clamp(importance_map, 0.0, 1.0)
-        importance_map = torch.nan_to_num(importance_map, nan=0.5)
-
-        return importance_map
+        return importance.squeeze(1)
 
 
-# ============================================================
-# FIS Layer 2: Bit Allocation
-# ============================================================
+# ==========================================================
+# 2️⃣ Bit Allocation Module
+# ==========================================================
 
 class FIS_BitAllocation(nn.Module):
+    """
+    Differentiable bit allocation
 
-    def __init__(self):
+    Input:
+        importance_map (B, H, W)
+        SNR_dB (float)
+        target_rate (float)
+
+    Output:
+        bits (B, H, W)  ∈ [min_bits, max_bits]
+    """
+
+    def __init__(self, min_bits=4, max_bits=12):
         super().__init__()
 
+        self.min_bits = min_bits
+        self.max_bits = max_bits
+
+        self.mapping = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+
     def forward(self, importance_map, SNR_dB, target_rate=0.5):
+        B, H, W = importance_map.shape
+        device = importance_map.device
 
-        # Safe linear mapping
-        bit_allocation = 1 + importance_map * 7  # Range [1, 8]
+        snr_norm = torch.tensor(SNR_dB / 30.0, device=device)
+        rate_norm = torch.tensor(target_rate, device=device)
 
-        bit_allocation = torch.clamp(bit_allocation, 1.0, 8.0)
-        bit_allocation = torch.nan_to_num(bit_allocation, nan=4.0)
+        snr_tensor = snr_norm.expand_as(importance_map)
+        rate_tensor = rate_norm.expand_as(importance_map)
 
-        return bit_allocation.long()
+        stacked = torch.stack(
+            [importance_map, snr_tensor, rate_tensor], dim=-1
+        )  # (B,H,W,3)
+
+        bits = self.mapping(stacked).squeeze(-1)
+
+        bits = self.min_bits + bits * (self.max_bits - self.min_bits)
+
+        return bits
 
 
-# ============================================================
-# Adaptive Quantizer (STABLE)
-# ============================================================
+# ==========================================================
+# 3️⃣ Adaptive Quantizer (Straight-Through Estimator)
+# ==========================================================
 
 class AdaptiveQuantizer(nn.Module):
+    """
+    Differentiable uniform quantizer with STE
+
+    Input:
+        features (B,C,H,W)
+        bit_allocation (B,H,W)
+
+    Output:
+        quantized features (B,C,H,W)
+    """
 
     def __init__(self):
         super().__init__()
@@ -161,39 +130,54 @@ class AdaptiveQuantizer(nn.Module):
     def forward(self, features, bit_allocation):
 
         B, C, H, W = features.shape
-        features_quantized = features.clone()
 
-        for b in range(B):
-            for i in range(H):
-                for j in range(W):
+        bits = bit_allocation.unsqueeze(1)  # (B,1,H,W)
 
-                    bits = int(bit_allocation[b, i, j].item())
+        levels = torch.pow(2.0, bits)
 
-                    # 🔥 HARD CLAMP
-                    bits = max(1, min(bits, 8))
+        f_min = features.amin(dim=1, keepdim=True)
+        f_max = features.amax(dim=1, keepdim=True)
 
-                    f_ij = features[b, :, i, j]
+        denom = (f_max - f_min) + 1e-6
 
-                    levels = 2 ** bits
+        f_norm = (features - f_min) / denom
 
-                    f_min = f_ij.min()
-                    f_max = f_ij.max()
+        # ----- Quantization -----
+        f_quant = torch.round(f_norm * (levels - 1)) / (levels - 1)
 
-                    if (f_max - f_min).abs() > 1e-8:
+        # Straight-Through Estimator
+        f_quant = f_norm + (f_quant - f_norm).detach()
 
-                        f_norm = (f_ij - f_min) / (f_max - f_min)
-                        f_norm = torch.clamp(f_norm, 0.0, 1.0)
+        f_dequant = f_quant * denom + f_min
 
-                        f_quant = torch.round(f_norm * (levels - 1)) / (levels - 1)
-                        f_dequant = f_quant * (f_max - f_min) + f_min
+        return f_dequant
 
-                        features_quantized[b, :, i, j] = f_dequant
 
-        features_quantized = torch.nan_to_num(
-            features_quantized,
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0
-        )
+# ==========================================================
+# 4️⃣ Complete HA-FIS Module (Ready to Plug into Encoder)
+# ==========================================================
 
-        return features_quantized
+class HAFIS_Module(nn.Module):
+    """
+    Complete hierarchical adaptive FIS block
+
+    Pipeline:
+        features → importance → bit allocation → quantization
+    """
+
+    def __init__(self, channels, min_bits=4, max_bits=12):
+        super().__init__()
+
+        self.importance_net = FIS_ImportanceAssessment(channels)
+        self.bit_allocator = FIS_BitAllocation(min_bits, max_bits)
+        self.quantizer = AdaptiveQuantizer()
+
+    def forward(self, features, snr_dB, target_rate=0.5):
+
+        importance = self.importance_net(features)
+
+        bits = self.bit_allocator(importance, snr_dB, target_rate)
+
+        quantized = self.quantizer(features, bits)
+
+        return quantized, importance, bits
