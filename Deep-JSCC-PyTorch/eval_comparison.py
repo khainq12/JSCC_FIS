@@ -1,67 +1,92 @@
 """
-Evaluation script
-Compatible with updated JSCC_FIS model
-Pipeline:
-encode → channel → decode
+Evaluation script to compare Baseline JSCC vs FIS-JSCC
+Compatible with your current training setup
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 import argparse
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 
 from model import JSCC, JSCC_FIS
 from channel import Channel
-from dataset import Vanilla
 from utils import get_psnr
 
-import torch.nn.functional as F
 
-
-# ============================================================
-# Simple SSIM
-# ============================================================
-
-def calculate_ssim(img1, img2):
+# =========================================
+# Simple SSIM (safe version)
+# =========================================
+def simple_ssim(x, y):
+    """
+    Lightweight SSIM approximation
+    """
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
-    mu1 = img1.mean()
-    mu2 = img2.mean()
+    mu_x = x.mean()
+    mu_y = y.mean()
 
-    sigma1 = img1.var()
-    sigma2 = img2.var()
-    sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
+    sigma_x = x.var()
+    sigma_y = y.var()
+    sigma_xy = ((x - mu_x) * (y - mu_y)).mean()
 
-    ssim = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
-           ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1 + sigma2 + C2))
+    ssim = ((2 * mu_x * mu_y + C1) * (2 * sigma_xy + C2)) / (
+        (mu_x ** 2 + mu_y ** 2 + C1) *
+        (sigma_x + sigma_y + C2)
+    )
 
     return ssim.item()
 
 
-# ============================================================
-# Evaluation
-# ============================================================
+# =========================================
+# Dataset Loader (CIFAR10 only)
+# =========================================
+def get_test_loader(dataset_name):
 
-def evaluate_model(model, test_loader,
-                   snr_list, channel_type,
-                   args, device):
+    if dataset_name.lower() == "cifar10":
+
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+
+        test_dataset = datasets.CIFAR10(
+            root="./dataset",
+            train=False,
+            download=True,
+            transform=transform
+        )
+
+    else:
+        raise ValueError("Currently only CIFAR10 supported for evaluation.")
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True
+    )
+
+    return test_loader
+
+
+# =========================================
+# Evaluate model
+# =========================================
+def evaluate_model(model, test_loader, snr_list, channel_type, args):
 
     model.eval()
 
-    results = {
-        'SNR': snr_list,
-        'PSNR': [],
-        'SSIM': []
-    }
+    results = {"SNR": snr_list, "PSNR": [], "SSIM": []}
 
     for snr in snr_list:
 
-        print(f'\nEvaluating at SNR = {snr} dB')
+        print(f"\nEvaluating at SNR = {snr} dB")
 
-        channel = Channel(channel_type=channel_type,
-                          snr=snr).to(device)
+        channel = Channel(channel_type=channel_type, snr=snr).cuda()
 
         psnr_list = []
         ssim_list = []
@@ -69,197 +94,125 @@ def evaluate_model(model, test_loader,
         with torch.no_grad():
             for images, _ in test_loader:
 
-                images = images.to(device)
+                images = images.cuda()
 
-                # =========================
-                # Encode
-                # =========================
+                # Forward
                 if isinstance(model, JSCC_FIS):
-
-                    encoded, _, info = model(
+                    encoded, decoded, info = model(
                         images,
-                        snr=snr,
                         target_rate=args.target_rate,
                         return_info=True
                     )
-
                 else:
-                    encoded, _ = model(images)
+                    encoded, decoded = model(images)
 
-                # =========================
                 # Channel
-                # =========================
                 encoded_noisy = channel(encoded)
+                decoded_noisy = model.decoder(encoded_noisy)
 
-                # =========================
-                # Decode
-                # =========================
-                decoded = model.decoder(encoded_noisy)
+                # Metrics
+                psnr = get_psnr(decoded_noisy * 255.0, images * 255.0)
+                ssim = simple_ssim(images, decoded_noisy)
 
-                psnr = get_psnr(decoded, images).item()
-                ssim = calculate_ssim(decoded, images)
-
-                psnr_list.append(psnr)
+                psnr_list.append(psnr.item())
                 ssim_list.append(ssim)
 
         avg_psnr = np.mean(psnr_list)
         avg_ssim = np.mean(ssim_list)
 
-        results['PSNR'].append(avg_psnr)
-        results['SSIM'].append(avg_ssim)
+        results["PSNR"].append(avg_psnr)
+        results["SSIM"].append(avg_ssim)
 
-        print(f'PSNR: {avg_psnr:.2f} dB, SSIM: {avg_ssim:.4f}')
+        print(f"PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f}")
 
     return results
 
 
-# ============================================================
-# Plot
-# ============================================================
-
-def plot_comparison(baseline_results,
-                    fis_results,
-                    save_path):
+# =========================================
+# Plot comparison
+# =========================================
+def plot_comparison(baseline_results, fis_results, save_path):
 
     plt.figure(figsize=(12, 5))
 
     # PSNR
     plt.subplot(1, 2, 1)
-    plt.plot(baseline_results['SNR'],
-             baseline_results['PSNR'],
-             'o-', label='Baseline')
-
-    plt.plot(fis_results['SNR'],
-             fis_results['PSNR'],
-             's-', label='FIS')
-
-    plt.xlabel('SNR (dB)')
-    plt.ylabel('PSNR (dB)')
-    plt.title('PSNR vs SNR')
-    plt.legend()
+    plt.plot(baseline_results["SNR"], baseline_results["PSNR"], "o-", label="Baseline")
+    plt.plot(fis_results["SNR"], fis_results["PSNR"], "s-", label="FIS-Enhanced")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("PSNR (dB)")
+    plt.title("PSNR vs SNR")
     plt.grid(True)
+    plt.legend()
 
     # SSIM
     plt.subplot(1, 2, 2)
-    plt.plot(baseline_results['SNR'],
-             baseline_results['SSIM'],
-             'o-', label='Baseline')
-
-    plt.plot(fis_results['SNR'],
-             fis_results['SSIM'],
-             's-', label='FIS')
-
-    plt.xlabel('SNR (dB)')
-    plt.ylabel('SSIM')
-    plt.title('SSIM vs SNR')
-    plt.legend()
+    plt.plot(baseline_results["SNR"], baseline_results["SSIM"], "o-", label="Baseline")
+    plt.plot(fis_results["SNR"], fis_results["SSIM"], "s-", label="FIS-Enhanced")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("SSIM")
+    plt.title("SSIM vs SNR")
     plt.grid(True)
+    plt.legend()
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f'Plot saved to {save_path}')
+    print(f"\nPlot saved to {save_path}")
 
 
-# ============================================================
+# =========================================
 # Main
-# ============================================================
-
+# =========================================
 def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--baseline_checkpoint',
-                        type=str, required=True)
-
-    parser.add_argument('--fis_checkpoint',
-                        type=str, required=True)
-
-    parser.add_argument('--test_root',
-                        type=str,
-                        default='./dataset/test')
-
-    parser.add_argument('--batch_size',
-                        type=int,
-                        default=32)
-
-    parser.add_argument('--snr_list',
-                        nargs='+',
-                        type=float,
+    parser.add_argument("--baseline_checkpoint", type=str, required=True)
+    parser.add_argument("--fis_checkpoint", type=str, required=True)
+    parser.add_argument("--dataset", type=str, default="cifar10")
+    parser.add_argument("--snr_list", nargs="+", type=float,
                         default=[1, 4, 7, 10, 13])
-
-    parser.add_argument('--channel',
-                        type=str,
-                        default='AWGN',
-                        choices=['AWGN', 'Rayleigh'])
-
-    # ⚠ IMPORTANT
-    parser.add_argument('--target_rate',
-                        type=float,
-                        default=8.0)
-
-    parser.add_argument('--save_plot',
-                        type=str,
-                        default='comparison.png')
+    parser.add_argument("--channel", type=str, default="AWGN",
+                        choices=["AWGN", "Rayleigh"])
+    parser.add_argument("--target_rate", type=float, default=0.5)
+    parser.add_argument("--save_plot", type=str, default="comparison.png")
 
     args = parser.parse_args()
 
-    device = torch.device("cuda"
-                          if torch.cuda.is_available()
-                          else "cpu")
+    print("Loading baseline model...")
+    baseline = JSCC(C=16, channel_num=16).cuda()
+    baseline.load_state_dict(torch.load(args.baseline_checkpoint))
+    baseline.eval()
 
-    print('Loading baseline model...')
-    baseline = JSCC(C=16,
-                    channel_num=16).to(device)
-    baseline.load_state_dict(
-        torch.load(args.baseline_checkpoint,
-                   map_location=device)
-    )
+    print("Loading FIS model...")
+    fis_model = JSCC_FIS(C=16, channel_num=16).cuda()
+    fis_model.load_state_dict(torch.load(args.fis_checkpoint))
+    fis_model.eval()
 
-    print('Loading FIS model...')
-    fis_model = JSCC_FIS(C=16,
-                         channel_num=16).to(device)
-    fis_model.load_state_dict(
-        torch.load(args.fis_checkpoint,
-                   map_location=device)
-    )
+    test_loader = get_test_loader(args.dataset)
 
-    test_dataset = Vanilla(args.test_root)
-    test_loader = DataLoader(test_dataset,
-                             batch_size=args.batch_size,
-                             shuffle=False)
-
-    print('\n=== Evaluating Baseline ===')
+    print("\n=== Evaluating Baseline ===")
     baseline_results = evaluate_model(
-        baseline, test_loader,
-        args.snr_list, args.channel,
-        args, device
+        baseline, test_loader, args.snr_list, args.channel, args
     )
 
-    print('\n=== Evaluating FIS ===')
+    print("\n=== Evaluating FIS ===")
     fis_results = evaluate_model(
-        fis_model, test_loader,
-        args.snr_list, args.channel,
-        args, device
+        fis_model, test_loader, args.snr_list, args.channel, args
     )
 
-    print('\n=== Comparison Table ===')
-    print(f'{"SNR":<8} {"Baseline":<12} '
-          f'{"FIS":<12} {"Gain":<10}')
-    print('-' * 45)
+    # Comparison Table
+    print("\n=== Comparison Table ===")
+    print(f"{'SNR':<8}{'Baseline':<12}{'FIS':<12}{'Gain':<10}")
+    print("-" * 40)
 
     for i, snr in enumerate(args.snr_list):
-        gain = fis_results['PSNR'][i] - \
-               baseline_results['PSNR'][i]
+        gain = fis_results["PSNR"][i] - baseline_results["PSNR"][i]
+        print(f"{snr:<8.1f}{baseline_results['PSNR'][i]:<12.2f}"
+              f"{fis_results['PSNR'][i]:<12.2f}{gain:<10.2f}")
 
-        print(f'{snr:<8.1f} '
-              f'{baseline_results["PSNR"][i]:<12.2f} '
-              f'{fis_results["PSNR"][i]:<12.2f} '
-              f'{gain:<10.2f}')
-
-    plot_comparison(baseline_results,
-                    fis_results,
-                    args.save_plot)
+    plot_comparison(baseline_results, fis_results, args.save_plot)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
