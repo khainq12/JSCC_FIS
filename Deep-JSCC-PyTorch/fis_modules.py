@@ -2,7 +2,7 @@
 Differentiable FIS Modules for Deep JSCC
 ----------------------------------------
 - Layer 1: Importance Assessment (Soft Fuzzy)
-- Layer 2: Bit Allocation (Soft Fuzzy)
+- Layer 2: Bit Allocation (Soft Fuzzy + Target Rate)
 - STE Quantizer
 
 Fully vectorized
@@ -13,7 +13,6 @@ Trainable end-to-end
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 # ============================================================
@@ -50,32 +49,25 @@ class FIS_ImportanceAssessment(nn.Module):
     def __init__(self, channels):
         super().__init__()
 
-        # feature compression
         self.compress = nn.Conv2d(channels, 1, 1)
 
-        # fuzzy memberships
         self.low = SoftMembership(0.0, 0.0, 0.5)
         self.medium = SoftMembership(0.3, 0.5, 0.7)
         self.high = SoftMembership(0.5, 1.0, 1.0)
 
-        # rule weights (learnable)
         self.w_low = nn.Parameter(torch.tensor(0.2))
         self.w_medium = nn.Parameter(torch.tensor(0.5))
         self.w_high = nn.Parameter(torch.tensor(0.8))
 
-        self.sigmoid = nn.Sigmoid()
-
     def forward(self, x):
 
-        # compress channels → magnitude proxy
         mag = torch.abs(self.compress(x))
-        mag = torch.sigmoid(mag)  # normalize to [0,1]
+        mag = torch.sigmoid(mag)
 
         mu_low = self.low(mag)
         mu_med = self.medium(mag)
         mu_high = self.high(mag)
 
-        # fuzzy aggregation (weighted average)
         numerator = (
             mu_low * self.w_low +
             mu_med * self.w_medium +
@@ -97,10 +89,11 @@ class FIS_BitAllocation(nn.Module):
     """
     Input:
         importance (B,1,H,W)
-        SNR_dB (scalar tensor)
+        SNR_dB (scalar or tensor)
+        target_rate (optional)
 
     Output:
-        bits_map (B,1,H,W) continuous in [min_bits, max_bits]
+        bits_map (B,1,H,W)
     """
 
     def __init__(self, min_bits=4, max_bits=12):
@@ -109,24 +102,34 @@ class FIS_BitAllocation(nn.Module):
         self.min_bits = min_bits
         self.max_bits = max_bits
 
-        # fuzzy memberships for importance
         self.low = SoftMembership(0.0, 0.0, 0.5)
         self.medium = SoftMembership(0.3, 0.5, 0.7)
         self.high = SoftMembership(0.5, 1.0, 1.0)
 
-        # rule consequents (learnable)
         self.b_low = nn.Parameter(torch.tensor(4.0))
         self.b_medium = nn.Parameter(torch.tensor(8.0))
         self.b_high = nn.Parameter(torch.tensor(12.0))
 
-    def forward(self, importance, SNR_dB):
+    def forward(self, importance, SNR_dB, target_rate=None):
 
-        # normalize SNR (0–30 dB → 0–1)
-        snr_norm = torch.clamp(SNR_dB / 30.0, 0, 1)
+        device = importance.device
 
-        # adapt importance by SNR
+        # -----------------------
+        # Handle SNR
+        # -----------------------
+        if not torch.is_tensor(SNR_dB):
+            SNR_dB = torch.tensor(SNR_dB, device=device)
+
+        snr_norm = torch.clamp(SNR_dB / 30.0, 0.0, 1.0)
+
+        # broadcast to match spatial dims
+        snr_norm = snr_norm.view(-1, 1, 1, 1)
+
         importance = importance * snr_norm
 
+        # -----------------------
+        # Fuzzy inference
+        # -----------------------
         mu_low = self.low(importance)
         mu_med = self.medium(importance)
         mu_high = self.high(importance)
@@ -140,6 +143,20 @@ class FIS_BitAllocation(nn.Module):
         denominator = mu_low + mu_med + mu_high + 1e-8
 
         bits = numerator / denominator
+
+        # -----------------------
+        # Global Target Rate
+        # -----------------------
+        if target_rate is not None:
+
+            if not torch.is_tensor(target_rate):
+                target_rate = torch.tensor(target_rate, device=device)
+
+            avg_bits = bits.mean()
+
+            scale = target_rate / (avg_bits + 1e-8)
+
+            bits = bits * scale
 
         bits = torch.clamp(bits, self.min_bits, self.max_bits)
 

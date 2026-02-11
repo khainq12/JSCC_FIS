@@ -1,13 +1,8 @@
 """
-Training script for FIS-enhanced model
-Compatible with:
-- model.py (JSCC_FIS)
-- channel.py (Channel class only)
-- dataset.py (Vanilla)
-- utils.py (get_psnr)
-Now supports:
---dataset cifar10
---dataset folder
+Training script for FIS-enhanced JSCC
+Compatible with updated model.py
+Pipeline:
+encode → channel → decode
 """
 
 import torch
@@ -27,9 +22,10 @@ from dataset import Vanilla
 from utils import get_psnr
 
 
-# =========================
+# ============================================================
 # AverageMeter
-# =========================
+# ============================================================
+
 class AverageMeter:
     def __init__(self):
         self.reset()
@@ -47,10 +43,13 @@ class AverageMeter:
         return self.sum / self.count if self.count != 0 else 0
 
 
-# =========================
-# Train One Epoch
-# =========================
-def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, args, writer):
+# ============================================================
+# Train
+# ============================================================
+
+def train_one_epoch(model, train_loader, channel, optimizer,
+                    criterion, epoch, args, writer):
+
     model.train()
     device = next(model.parameters()).device
 
@@ -58,33 +57,47 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
     psnr_meter = AverageMeter()
 
     for batch_idx, (images, _) in enumerate(train_loader):
-        images = images.to(device)
 
+        images = images.to(device)
         optimizer.zero_grad()
 
-        encoded, decoded, info = model(
+        # =========================
+        # Forward (encode only)
+        # =========================
+        encoded, _, info = model(
             images,
             snr=args.snr,
             target_rate=args.target_rate,
             return_info=True
         )
 
+        # =========================
+        # Channel
+        # =========================
         encoded_noisy = channel(encoded)
-        decoded_noisy = model.decoder(encoded_noisy)
 
-        loss = criterion(decoded_noisy, images)
+        # =========================
+        # Decode
+        # =========================
+        decoded = model.decoder(encoded_noisy)
 
+        # =========================
+        # Loss
+        # =========================
+        loss = criterion(decoded, images)
         loss.backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        psnr = get_psnr(decoded_noisy, images).item()
+        psnr = get_psnr(decoded, images).item()
 
         loss_meter.update(loss.item(), images.size(0))
         psnr_meter.update(psnr, images.size(0))
 
         if batch_idx % args.log_interval == 0:
-            print(f'Epoch [{epoch}] [{batch_idx}/{len(train_loader)}] '
+            print(f'Epoch [{epoch}] '
+                  f'[{batch_idx}/{len(train_loader)}] '
                   f'Loss: {loss_meter.avg:.4f} '
                   f'PSNR: {psnr_meter.avg:.2f}')
 
@@ -94,10 +107,13 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
     return loss_meter.avg, psnr_meter.avg
 
 
-# =========================
+# ============================================================
 # Validation
-# =========================
-def validate(model, val_loader, channel, criterion, epoch, args, writer):
+# ============================================================
+
+def validate(model, val_loader, channel,
+             criterion, epoch, args, writer):
+
     model.eval()
     device = next(model.parameters()).device
 
@@ -106,9 +122,10 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
 
     with torch.no_grad():
         for images, _ in val_loader:
+
             images = images.to(device)
 
-            encoded, decoded, info = model(
+            encoded, _, info = model(
                 images,
                 snr=args.snr,
                 target_rate=args.target_rate,
@@ -116,10 +133,10 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
             )
 
             encoded_noisy = channel(encoded)
-            decoded_noisy = model.decoder(encoded_noisy)
+            decoded = model.decoder(encoded_noisy)
 
-            loss = criterion(decoded_noisy, images)
-            psnr = get_psnr(decoded_noisy, images).item()
+            loss = criterion(decoded, images)
+            psnr = get_psnr(decoded, images).item()
 
             loss_meter.update(loss.item(), images.size(0))
             psnr_meter.update(psnr, images.size(0))
@@ -133,21 +150,21 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
     return loss_meter.avg, psnr_meter.avg
 
 
-# =========================
+# ============================================================
 # Main
-# =========================
+# ============================================================
+
 def main():
+
     parser = argparse.ArgumentParser()
 
-    # Dataset choice
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['cifar10', 'folder'],
-                        help='dataset type')
+                        choices=['cifar10', 'folder'])
 
     parser.add_argument('--data_root', type=str, default='./dataset/train')
     parser.add_argument('--val_root', type=str, default='./dataset/val')
 
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-3)
 
@@ -158,8 +175,10 @@ def main():
     parser.add_argument('--channel', type=str, default='AWGN',
                         choices=['AWGN', 'Rayleigh'])
 
-    parser.add_argument('--target_rate', type=float, default=0.5)
-    parser.add_argument('--log_interval', type=int, default=10)
+    # ⚠ IMPORTANT
+    parser.add_argument('--target_rate', type=float, default=8.0)
+
+    parser.add_argument('--log_interval', type=int, default=20)
 
     args = parser.parse_args()
 
@@ -172,12 +191,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    model = JSCC_FIS(C=args.C, channel_num=args.channel_num).to(device)
+    model = JSCC_FIS(C=args.C,
+                     channel_num=args.channel_num).to(device)
 
     # =========================
-    # Dataset loading
+    # Dataset
     # =========================
     if args.dataset == 'cifar10':
+
         transform = transforms.ToTensor()
 
         train_dataset = datasets.CIFAR10(
@@ -194,12 +215,9 @@ def main():
             transform=transform
         )
 
-    elif args.dataset == 'folder':
+    else:
         train_dataset = Vanilla(args.data_root)
         val_dataset = Vanilla(args.val_root)
-
-    else:
-        raise ValueError("Unknown dataset type")
 
     train_loader = DataLoader(train_dataset,
                               batch_size=args.batch_size,
@@ -222,6 +240,7 @@ def main():
     best_psnr = 0
 
     for epoch in range(1, args.epochs + 1):
+
         print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
         train_loss, train_psnr = train_one_epoch(

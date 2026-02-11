@@ -1,6 +1,9 @@
 """
 model.py
-Baseline JSCC + FIS-Enhanced JSCC
+FIS-Enhanced Deep JSCC
+Clean pipeline:
+encode → quantize → (return encoded)
+Decoder is called outside after channel
 """
 
 import torch
@@ -13,88 +16,60 @@ from fis_modules import (
 )
 
 
-# ============================================================
-# BASELINE MODEL (UNCHANGED)
-# ============================================================
-
-class JSCC(nn.Module):
-    """Original JSCC model (baseline)"""
-
-    def __init__(self, C=16, channel_num=16):
-        super(JSCC, self).__init__()
-
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, C, 5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, channel_num, 5, stride=1, padding=2),
-        )
-
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(channel_num, C, 5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, 3, 5, stride=2, padding=2, output_padding=1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return encoded, decoded
-
-
-# ============================================================
-# FIS-ENHANCED MODEL
-# ============================================================
-
 class JSCC_FIS(nn.Module):
-    """FIS-Enhanced JSCC model"""
 
-    def __init__(self, C=16, channel_num=16,
-                 min_bits=4, max_bits=12):
+    def __init__(self,
+                 C=16,
+                 channel_num=16,
+                 min_bits=4,
+                 max_bits=12):
 
         super(JSCC_FIS, self).__init__()
 
-        # Encoder (same as baseline)
+        # =======================
+        # Encoder
+        # =======================
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, C, 5, stride=2, padding=2),
+            nn.Conv2d(3, C, 5, 2, 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
+
+            nn.Conv2d(C, C, 5, 2, 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
+
+            nn.Conv2d(C, C, 5, 2, 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, 5, stride=2, padding=2),
+
+            nn.Conv2d(C, C, 5, 2, 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(C, channel_num, 5, stride=1, padding=2),
+
+            nn.Conv2d(C, channel_num, 5, 1, 2),
         )
 
-        # Decoder (same as baseline)
+        # =======================
+        # Decoder
+        # =======================
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(channel_num, C, 5, stride=1, padding=2),
+            nn.ConvTranspose2d(channel_num, C, 5, 1, 2),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
+
+            nn.ConvTranspose2d(C, C, 5, 2, 2, output_padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
+
+            nn.ConvTranspose2d(C, C, 5, 2, 2, output_padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, 5, stride=2, padding=2, output_padding=1),
+
+            nn.ConvTranspose2d(C, C, 5, 2, 2, output_padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, 3, 5, stride=2, padding=2, output_padding=1),
+
+            nn.ConvTranspose2d(C, 3, 5, 2, 2, output_padding=1),
             nn.Sigmoid()
         )
 
-        # ===== FIS MODULES =====
+        # =======================
+        # FIS
+        # =======================
         self.fis_importance = FIS_ImportanceAssessment(channel_num)
+
         self.fis_allocation = FIS_BitAllocation(
             min_bits=min_bits,
             max_bits=max_bits
@@ -103,59 +78,34 @@ class JSCC_FIS(nn.Module):
         self.quantizer = STEQuantizer()
 
     # ========================================================
-    # FORWARD
+    # Forward (NO decode here)
     # ========================================================
-
     def forward(self,
                 x,
                 snr=10.0,
+                target_rate=None,
                 return_info=False):
-
-        """
-        Args:
-            x: (B,3,H,W)
-            snr: float or tensor
-            return_info: return debug info
-
-        Returns:
-            encoded_q, decoded, (optional info)
-        """
 
         device = x.device
 
         if not torch.is_tensor(snr):
             snr = torch.tensor(snr, device=device)
 
-        # -----------------------
         # Encode
-        # -----------------------
-        encoded = self.encoder(x)  # (B, channel_num, H', W')
+        encoded = self.encoder(x)
 
-        # -----------------------
-        # FIS Importance
-        # -----------------------
-        importance_map = self.fis_importance(encoded)  # (B,1,H',W')
+        # Importance
+        importance_map = self.fis_importance(encoded)
 
-        # -----------------------
-        # Bit Allocation
-        # -----------------------
+        # Bit allocation
         bit_allocation = self.fis_allocation(
             importance_map,
-            snr
-        )  # (B,1,H',W')
-
-        # -----------------------
-        # Quantization
-        # -----------------------
-        encoded_q = self.quantizer(
-            encoded,
-            bit_allocation
+            snr,
+            target_rate
         )
 
-        # -----------------------
-        # Decode
-        # -----------------------
-        decoded = self.decoder(encoded_q)
+        # Quantization
+        encoded_q = self.quantizer(encoded, bit_allocation)
 
         if return_info:
             info = {
@@ -163,6 +113,6 @@ class JSCC_FIS(nn.Module):
                 "bit_allocation": bit_allocation,
                 "avg_bits": bit_allocation.mean().item()
             }
-            return encoded_q, decoded, info
+            return encoded_q, None, info
 
-        return encoded_q, decoded
+        return encoded_q
