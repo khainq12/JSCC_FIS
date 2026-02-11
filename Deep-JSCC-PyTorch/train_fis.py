@@ -1,21 +1,29 @@
 """
-Training script for FIS-enhanced model
-Fixed version compatible with Channel class
+Training script for FIS-enhanced Deep JSCC
+Fully fixed version (No get_dataloader dependency)
+Compatible with Kaggle & Local GPU
 """
+
+import os
+import argparse
+from datetime import datetime
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-import argparse
-import os
-from datetime import datetime
+from torchvision import datasets, transforms
 
 from model import JSCC_FIS
-from channel import Channel   # ✅ FIXED HERE
-from dataset import get_dataloader
+from channel import Channel
+from dataset import Vanilla
 from utils import AverageMeter, calculate_psnr
 
+
+# =====================================================
+# Training
+# =====================================================
 
 def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, args, writer):
     model.train()
@@ -25,11 +33,11 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
     bits_meter = AverageMeter()
 
     for batch_idx, (images, _) in enumerate(train_loader):
-        images = images.cuda()
+
+        images = images.cuda(non_blocking=True)
 
         optimizer.zero_grad()
 
-        # Forward with FIS
         encoded, decoded, info = model(
             images,
             snr=args.snr,
@@ -37,21 +45,15 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
             return_info=True
         )
 
-        # Apply channel
         encoded_noisy = channel(encoded)
-
-        # Decode noisy signal
         decoded_noisy = model.decoder(encoded_noisy)
 
-        # Loss
         loss = criterion(decoded_noisy, images)
 
-        # Backward
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        # Metrics
         psnr = calculate_psnr(images, decoded_noisy)
         avg_bits = info['avg_bits']
 
@@ -60,7 +62,7 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
         bits_meter.update(avg_bits, images.size(0))
 
         if batch_idx % args.log_interval == 0:
-            print(f'Epoch [{epoch}][{batch_idx}/{len(train_loader)}] '
+            print(f'Epoch [{epoch}] [{batch_idx}/{len(train_loader)}] '
                   f'Loss: {loss_meter.avg:.4f} '
                   f'PSNR: {psnr_meter.avg:.2f} '
                   f'Bits: {bits_meter.avg:.2f}')
@@ -72,6 +74,10 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
     return loss_meter.avg, psnr_meter.avg, bits_meter.avg
 
 
+# =====================================================
+# Validation
+# =====================================================
+
 def validate(model, val_loader, channel, criterion, epoch, args, writer):
     model.eval()
 
@@ -81,7 +87,8 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
 
     with torch.no_grad():
         for images, _ in val_loader:
-            images = images.cuda()
+
+            images = images.cuda(non_blocking=True)
 
             encoded, decoded, info = model(
                 images,
@@ -112,17 +119,24 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
     return loss_meter.avg, psnr_meter.avg, bits_meter.avg
 
 
+# =====================================================
+# Main
+# =====================================================
+
 def main():
+
     parser = argparse.ArgumentParser(description='Train FIS-Enhanced Deep JSCC')
 
     # Model
     parser.add_argument('--C', type=int, default=16)
     parser.add_argument('--channel_num', type=int, default=16)
 
-    # Training
+    # Dataset
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'imagenet'])
     parser.add_argument('--batch_size', type=int, default=64)
+
+    # Training
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -142,26 +156,80 @@ def main():
 
     args = parser.parse_args()
 
-    # Create directories
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Using device:", device)
+
+    # Experiment folder
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     exp_name = f'FIS_{args.dataset}_C{args.C}_SNR{args.snr}_{timestamp}'
 
     save_path = os.path.join(args.save_dir, exp_name)
     log_path = os.path.join(args.log_dir, exp_name)
+
     os.makedirs(save_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
 
     writer = SummaryWriter(log_path)
 
+    # =====================================================
+    # Dataset Loader
+    # =====================================================
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    if args.dataset == 'cifar10':
+
+        train_dataset = datasets.CIFAR10(
+            root='./data',
+            train=True,
+            download=True,
+            transform=transform
+        )
+
+        val_dataset = datasets.CIFAR10(
+            root='./data',
+            train=False,
+            download=True,
+            transform=transform
+        )
+
+    else:  # ImageNet
+
+        train_dataset = Vanilla(
+            root='./dataset/ImageNet/train',
+            transform=transform
+        )
+
+        val_dataset = Vanilla(
+            root='./dataset/ImageNet/val',
+            transform=transform
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2,      # Safe for Kaggle
+        pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True
+    )
+
+    # =====================================================
     # Model
-    model = JSCC_FIS(C=args.C, channel_num=args.channel_num).cuda()
-    print(f"Model created: {exp_name}")
+    # =====================================================
 
-    # Dataset
-    train_loader = get_dataloader(args.dataset, 'train', args.batch_size)
-    val_loader = get_dataloader(args.dataset, 'val', args.batch_size)
+    model = JSCC_FIS(C=args.C, channel_num=args.channel_num).to(device)
+    print("Model created:", exp_name)
 
-    # Loss & Optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(),
                            lr=args.lr,
@@ -171,12 +239,16 @@ def main():
                                           step_size=640,
                                           gamma=0.1)
 
-    # ✅ FIXED CHANNEL CREATION
     channel = Channel(channel_type=args.channel, snr=args.snr)
 
     best_psnr = 0
 
+    # =====================================================
+    # Training Loop
+    # =====================================================
+
     for epoch in range(1, args.epochs + 1):
+
         print(f'\n=== Epoch {epoch}/{args.epochs} ===')
 
         train_loss, train_psnr, train_bits = train_one_epoch(
@@ -193,6 +265,7 @@ def main():
 
         if val_psnr > best_psnr:
             best_psnr = val_psnr
+
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -200,6 +273,7 @@ def main():
                 'psnr': val_psnr,
                 'args': args
             }, os.path.join(save_path, 'best.pth'))
+
             print(f'Best model saved (PSNR: {val_psnr:.2f} dB)')
 
     writer.close()
