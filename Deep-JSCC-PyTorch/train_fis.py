@@ -5,6 +5,9 @@ Compatible with:
 - channel.py (Channel class only)
 - dataset.py (Vanilla)
 - utils.py (get_psnr)
+Now supports:
+--dataset cifar10
+--dataset folder
 """
 
 import torch
@@ -15,6 +18,8 @@ from torch.utils.tensorboard import SummaryWriter
 import argparse
 import os
 from datetime import datetime
+
+from torchvision import datasets, transforms
 
 from model import JSCC_FIS
 from channel import Channel
@@ -64,10 +69,7 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
             return_info=True
         )
 
-        # Apply channel
         encoded_noisy = channel(encoded)
-
-        # Decode noisy signal
         decoded_noisy = model.decoder(encoded_noisy)
 
         loss = criterion(decoded_noisy, images)
@@ -137,6 +139,11 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
 def main():
     parser = argparse.ArgumentParser()
 
+    # Dataset choice
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                        choices=['cifar10', 'folder'],
+                        help='dataset type')
+
     parser.add_argument('--data_root', type=str, default='./dataset/train')
     parser.add_argument('--val_root', type=str, default='./dataset/val')
 
@@ -148,17 +155,14 @@ def main():
     parser.add_argument('--channel_num', type=int, default=16)
 
     parser.add_argument('--snr', type=float, default=10.0)
-    parser.add_argument('--channel', type=str, default='AWGN', choices=['AWGN', 'Rayleigh'])
+    parser.add_argument('--channel', type=str, default='AWGN',
+                        choices=['AWGN', 'Rayleigh'])
 
     parser.add_argument('--target_rate', type=float, default=0.5)
-
     parser.add_argument('--log_interval', type=int, default=10)
 
     args = parser.parse_args()
 
-    # =========================
-    # Setup
-    # =========================
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     save_dir = f'./out/FIS_{timestamp}'
     os.makedirs(save_dir, exist_ok=True)
@@ -168,63 +172,72 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    # =========================
-    # Model
-    # =========================
     model = JSCC_FIS(C=args.C, channel_num=args.channel_num).to(device)
 
     # =========================
-    # Dataset
+    # Dataset loading
     # =========================
-    train_dataset = Vanilla(args.data_root)
-    val_dataset = Vanilla(args.val_root)
+    if args.dataset == 'cifar10':
+        transform = transforms.ToTensor()
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True if device.type == "cuda" else False
-    )
+        train_dataset = datasets.CIFAR10(
+            root='./dataset',
+            train=True,
+            download=True,
+            transform=transform
+        )
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True if device.type == "cuda" else False
-    )
+        val_dataset = datasets.CIFAR10(
+            root='./dataset',
+            train=False,
+            download=True,
+            transform=transform
+        )
 
-    # =========================
-    # Optimizer
-    # =========================
+    elif args.dataset == 'folder':
+        train_dataset = Vanilla(args.data_root)
+        val_dataset = Vanilla(args.val_root)
+
+    else:
+        raise ValueError("Unknown dataset type")
+
+    train_loader = DataLoader(train_dataset,
+                              batch_size=args.batch_size,
+                              shuffle=True,
+                              num_workers=4,
+                              pin_memory=(device.type == "cuda"))
+
+    val_loader = DataLoader(val_dataset,
+                            batch_size=args.batch_size,
+                            shuffle=False,
+                            num_workers=4,
+                            pin_memory=(device.type == "cuda"))
+
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    # =========================
-    # Channel
-    # =========================
-    channel = Channel(channel_type=args.channel, snr=args.snr).to(device)
+    channel = Channel(channel_type=args.channel,
+                      snr=args.snr).to(device)
 
     best_psnr = 0
 
-    # =========================
-    # Training Loop
-    # =========================
     for epoch in range(1, args.epochs + 1):
         print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
         train_loss, train_psnr = train_one_epoch(
-            model, train_loader, channel, optimizer, criterion, epoch, args, writer
+            model, train_loader, channel,
+            optimizer, criterion, epoch, args, writer
         )
 
         val_loss, val_psnr = validate(
-            model, val_loader, channel, criterion, epoch, args, writer
+            model, val_loader, channel,
+            criterion, epoch, args, writer
         )
 
         if val_psnr > best_psnr:
             best_psnr = val_psnr
-            torch.save(model.state_dict(), os.path.join(save_dir, 'best.pth'))
+            torch.save(model.state_dict(),
+                       os.path.join(save_dir, 'best.pth'))
             print(f'Best model saved (PSNR: {best_psnr:.2f} dB)')
 
     writer.close()
