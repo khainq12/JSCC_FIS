@@ -1,7 +1,6 @@
 """
 Training script for FIS-enhanced Deep JSCC
-Fully fixed version (No get_dataloader dependency)
-Compatible with Kaggle & Local GPU
+Fully compatible with your current utils.py
 """
 
 import os
@@ -18,7 +17,26 @@ from torchvision import datasets, transforms
 from model import JSCC_FIS
 from channel import Channel
 from dataset import Vanilla
-from utils import AverageMeter, calculate_psnr
+from utils import get_psnr
+
+
+# =====================================================
+# Average Meter (self-contained)
+# =====================================================
+
+class AverageMeter:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.sum = 0
+        self.count = 0
+        self.avg = 0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
 
 
 # =====================================================
@@ -54,7 +72,7 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        psnr = calculate_psnr(images, decoded_noisy)
+        psnr = get_psnr(decoded_noisy * 255.0, images * 255.0).item()
         avg_bits = info['avg_bits']
 
         loss_meter.update(loss.item(), images.size(0))
@@ -101,7 +119,7 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
             decoded_noisy = model.decoder(encoded_noisy)
 
             loss = criterion(decoded_noisy, images)
-            psnr = calculate_psnr(images, decoded_noisy)
+            psnr = get_psnr(decoded_noisy * 255.0, images * 255.0).item()
             avg_bits = info['avg_bits']
 
             loss_meter.update(loss.item(), images.size(0))
@@ -127,29 +145,23 @@ def main():
 
     parser = argparse.ArgumentParser(description='Train FIS-Enhanced Deep JSCC')
 
-    # Model
     parser.add_argument('--C', type=int, default=16)
     parser.add_argument('--channel_num', type=int, default=16)
 
-    # Dataset
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'imagenet'])
     parser.add_argument('--batch_size', type=int, default=64)
 
-    # Training
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=5e-4)
 
-    # Channel
     parser.add_argument('--snr', type=float, default=10.0)
     parser.add_argument('--channel', type=str, default='AWGN',
                         choices=['AWGN', 'Rayleigh'])
 
-    # FIS
     parser.add_argument('--target_rate', type=float, default=0.5)
 
-    # Misc
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--save_dir', type=str, default='./out/checkpoint')
     parser.add_argument('--log_dir', type=str, default='./out/logs')
@@ -159,7 +171,6 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Using device:", device)
 
-    # Experiment folder
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     exp_name = f'FIS_{args.dataset}_C{args.C}_SNR{args.snr}_{timestamp}'
 
@@ -171,16 +182,12 @@ def main():
 
     writer = SummaryWriter(log_path)
 
-    # =====================================================
-    # Dataset Loader
-    # =====================================================
-
+    # Dataset
     transform = transforms.Compose([
         transforms.ToTensor(),
     ])
 
     if args.dataset == 'cifar10':
-
         train_dataset = datasets.CIFAR10(
             root='./data',
             train=True,
@@ -194,41 +201,23 @@ def main():
             download=True,
             transform=transform
         )
+    else:
+        train_dataset = Vanilla('./dataset/ImageNet/train', transform)
+        val_dataset = Vanilla('./dataset/ImageNet/val', transform)
 
-    else:  # ImageNet
+    train_loader = DataLoader(train_dataset,
+                              batch_size=args.batch_size,
+                              shuffle=True,
+                              num_workers=2,
+                              pin_memory=True)
 
-        train_dataset = Vanilla(
-            root='./dataset/ImageNet/train',
-            transform=transform
-        )
-
-        val_dataset = Vanilla(
-            root='./dataset/ImageNet/val',
-            transform=transform
-        )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=2,      # Safe for Kaggle
-        pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True
-    )
-
-    # =====================================================
-    # Model
-    # =====================================================
+    val_loader = DataLoader(val_dataset,
+                            batch_size=args.batch_size,
+                            shuffle=False,
+                            num_workers=2,
+                            pin_memory=True)
 
     model = JSCC_FIS(C=args.C, channel_num=args.channel_num).to(device)
-    print("Model created:", exp_name)
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(),
@@ -242,10 +231,6 @@ def main():
     channel = Channel(channel_type=args.channel, snr=args.snr)
 
     best_psnr = 0
-
-    # =====================================================
-    # Training Loop
-    # =====================================================
 
     for epoch in range(1, args.epochs + 1):
 
@@ -266,13 +251,8 @@ def main():
         if val_psnr > best_psnr:
             best_psnr = val_psnr
 
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'psnr': val_psnr,
-                'args': args
-            }, os.path.join(save_path, 'best.pth'))
+            torch.save(model.state_dict(),
+                       os.path.join(save_path, 'best.pth'))
 
             print(f'Best model saved (PSNR: {val_psnr:.2f} dB)')
 
