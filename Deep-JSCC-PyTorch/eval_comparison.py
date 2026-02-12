@@ -1,28 +1,27 @@
 """
-Evaluation script to compare Baseline JSCC vs FIS-JSCC
-Compatible with your current training setup
+Evaluation script to compare Baseline DeepJSCC vs FIS-JSCC
+Compatible with:
+- model_baseline.py (DeepJSCC original)
+- model.py (JSCC_FIS)
 """
 
 import torch
-import torch.nn as nn
 import numpy as np
 import argparse
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from model import JSCC, JSCC_FIS
+from model import JSCC_FIS
+from model_baseline import DeepJSCC
 from channel import Channel
 from utils import get_psnr
 
 
 # =========================================
-# Simple SSIM (safe version)
+# Simple SSIM
 # =========================================
 def simple_ssim(x, y):
-    """
-    Lightweight SSIM approximation
-    """
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
@@ -60,7 +59,7 @@ def get_test_loader(dataset_name):
         )
 
     else:
-        raise ValueError("Currently only CIFAR10 supported for evaluation.")
+        raise ValueError("Currently only CIFAR10 supported.")
 
     test_loader = DataLoader(
         test_dataset,
@@ -79,7 +78,6 @@ def get_test_loader(dataset_name):
 def evaluate_model(model, test_loader, snr_list, channel_type, args):
 
     model.eval()
-
     results = {"SNR": snr_list, "PSNR": [], "SSIM": []}
 
     for snr in snr_list:
@@ -96,23 +94,38 @@ def evaluate_model(model, test_loader, snr_list, channel_type, args):
 
                 images = images.cuda()
 
-                # Forward
-                if isinstance(model, JSCC_FIS):
+                # =========================
+                # BASELINE DeepJSCC
+                # =========================
+                if isinstance(model, DeepJSCC):
+
+                    # encode
+                    encoded = model.encoder(images)
+
+                    # channel
+                    encoded_noisy = channel(encoded)
+
+                    # decode
+                    decoded = model.decoder(encoded_noisy)
+
+                # =========================
+                # FIS-JSCC
+                # =========================
+                else:
                     encoded, decoded, info = model(
                         images,
+                        snr=snr,
                         target_rate=args.target_rate,
                         return_info=True
                     )
-                else:
-                    encoded, decoded = model(images)
 
-                # Channel
-                encoded_noisy = channel(encoded)
-                decoded_noisy = model.decoder(encoded_noisy)
+                    # channel after quantization
+                    encoded_noisy = channel(encoded)
+                    decoded = model.decoder(encoded_noisy)
 
                 # Metrics
-                psnr = get_psnr(decoded_noisy * 255.0, images * 255.0)
-                ssim = simple_ssim(images, decoded_noisy)
+                psnr = get_psnr(decoded * 255.0, images * 255.0)
+                ssim = simple_ssim(images, decoded)
 
                 psnr_list.append(psnr.item())
                 ssim_list.append(ssim)
@@ -179,11 +192,17 @@ def main():
 
     args = parser.parse_args()
 
-    print("Loading baseline model...")
-    baseline = JSCC(C=16, channel_num=16).cuda()
+    # =========================
+    # Load Baseline
+    # =========================
+    print("Loading baseline DeepJSCC...")
+    baseline = DeepJSCC(c=16).cuda()
     baseline.load_state_dict(torch.load(args.baseline_checkpoint))
     baseline.eval()
 
+    # =========================
+    # Load FIS
+    # =========================
     print("Loading FIS model...")
     fis_model = JSCC_FIS(C=16, channel_num=16).cuda()
     fis_model.load_state_dict(torch.load(args.fis_checkpoint))
@@ -201,15 +220,19 @@ def main():
         fis_model, test_loader, args.snr_list, args.channel, args
     )
 
+    # =========================
     # Comparison Table
+    # =========================
     print("\n=== Comparison Table ===")
     print(f"{'SNR':<8}{'Baseline':<12}{'FIS':<12}{'Gain':<10}")
     print("-" * 40)
 
     for i, snr in enumerate(args.snr_list):
         gain = fis_results["PSNR"][i] - baseline_results["PSNR"][i]
-        print(f"{snr:<8.1f}{baseline_results['PSNR'][i]:<12.2f}"
-              f"{fis_results['PSNR'][i]:<12.2f}{gain:<10.2f}")
+        print(f"{snr:<8.1f}"
+              f"{baseline_results['PSNR'][i]:<12.2f}"
+              f"{fis_results['PSNR'][i]:<12.2f}"
+              f"{gain:<10.2f}")
 
     plot_comparison(baseline_results, fis_results, args.save_plot)
 
