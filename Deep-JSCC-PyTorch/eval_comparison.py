@@ -1,7 +1,7 @@
 """
 Evaluation script to compare Baseline DeepJSCC vs FIS-JSCC
 Compatible with:
-- model_baseline.py (DeepJSCC original)
+- model_baseline.py (DeepJSCC original - chunbaobao)
 - model.py (JSCC_FIS)
 """
 
@@ -19,7 +19,7 @@ from utils import get_psnr
 
 
 # =========================================
-# Simple SSIM
+# Simple SSIM (lightweight version)
 # =========================================
 def simple_ssim(x, y):
     C1 = 0.01 ** 2
@@ -99,13 +99,8 @@ def evaluate_model(model, test_loader, snr_list, channel_type, args):
                 # =========================
                 if isinstance(model, DeepJSCC):
 
-                    # encode
                     encoded = model.encoder(images)
-
-                    # channel
                     encoded_noisy = channel(encoded)
-
-                    # decode
                     decoded = model.decoder(encoded_noisy)
 
                 # =========================
@@ -119,7 +114,6 @@ def evaluate_model(model, test_loader, snr_list, channel_type, args):
                         return_info=True
                     )
 
-                    # channel after quantization
                     encoded_noisy = channel(encoded)
                     decoded = model.decoder(encoded_noisy)
 
@@ -193,10 +187,10 @@ def main():
     args = parser.parse_args()
 
     # =========================
-    # Load Baseline
+    # Load Baseline (IMPORTANT: c=4)
     # =========================
     print("Loading baseline DeepJSCC...")
-    baseline = DeepJSCC(c=16).cuda()
+    baseline = DeepJSCC(c=4).cuda()   # 🔥 c=4 (vì checkpoint conv5 out=8 => 2c=8)
     baseline.load_state_dict(torch.load(args.baseline_checkpoint))
     baseline.eval()
 
