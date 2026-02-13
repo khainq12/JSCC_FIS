@@ -204,7 +204,7 @@ def main():
     # Load FIS
     # =========================
     print("Loading FIS model...")
-    fis_model = DeepJSCC_FIS(C=16, channel_num=16).cuda()
+    fis_model = DeepJSCC_FIS(c=16).cuda()
     fis_model.load_state_dict(torch.load(args.fis_checkpoint))
     fis_model.eval()
 
