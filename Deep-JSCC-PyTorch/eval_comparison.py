@@ -15,6 +15,11 @@ from torchvision import datasets, transforms
 # from model import JSCC_FIS  # (old)
 from model_baseline import DeepJSCC_FIS
 from model_baseline import DeepJSCC
+
+# from model import JSCC_FIS
+# from model_baseline import DeepJSCC
+
+
 from channel import Channel
 from utils import get_psnr
 
@@ -199,7 +204,7 @@ def main():
     # Load FIS
     # =========================
     print("Loading FIS model...")
-    fis_model = JSCC_FIS(C=16, channel_num=16).cuda()
+    fis_model = DeepJSCC_FIS(C=16, channel_num=16).cuda()
     fis_model.load_state_dict(torch.load(args.fis_checkpoint))
     fis_model.eval()
 
