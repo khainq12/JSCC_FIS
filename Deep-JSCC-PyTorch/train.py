@@ -12,7 +12,7 @@ from torchvision import datasets
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from tqdm import tqdm
-from model import DeepJSCC, ratio2filtersize
+from model_baseline import DeepJSCC, ratio2filtersize
 from torch.nn.parallel import DataParallel
 from utils import image_normalization, set_seed, save_model, view_model_param
 from fractions import Fraction

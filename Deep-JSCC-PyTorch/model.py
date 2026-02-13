@@ -1,116 +1,25 @@
+# -*- coding: utf-8 -*-
 """
-Modified model.py to add FIS-enhanced version
+Compatibility wrapper.
+
+The original repository contained two different model implementations:
+- `model_baseline.py`: Deep-JSCC-PyTorch-style baseline (recommended for the paper)
+- `model.py`: an alternative CNN autoencoder variant
+
+To keep the project runnable and avoid import errors, this file re-exports the
+baseline models and the new FIS-enhanced model that uses the SAME encoder/decoder
+for fair comparison.
+
+Use:
+    from model import DeepJSCC, DeepJSCC_FIS, ratio2filtersize
+
+Legacy alias:
+    JSCC_FIS  -> DeepJSCC_FIS
 """
 
-import torch
-import torch.nn as nn
-from fis_modules import FIS_ImportanceAssessment, FIS_BitAllocation, AdaptiveQuantizer
+from __future__ import annotations
 
+from model_baseline import DeepJSCC, DeepJSCC_FIS, ratio2filtersize
 
-class JSCC(nn.Module):
-    """Original JSCC model (unchanged for baseline comparison)"""
-    def __init__(self, C=16, channel_num=16):
-        super(JSCC, self).__init__()
-        
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, channel_num, kernel_size=5, stride=1, padding=2),
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(channel_num, C, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, 3, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return encoded, decoded
-
-
-class JSCC_FIS(nn.Module):
-    """FIS-Enhanced JSCC model"""
-    def __init__(self, C=16, channel_num=16):
-        super(JSCC_FIS, self).__init__()
-        
-        # Same encoder/decoder as baseline
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, channel_num, kernel_size=5, stride=1, padding=2),
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(channel_num, C, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, C, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(C, 3, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.Sigmoid()
-        )
-        
-        # FIS modules (NEW)
-        self.fis_importance = FIS_ImportanceAssessment()
-        self.fis_allocation = FIS_BitAllocation()
-        self.quantizer = AdaptiveQuantizer()
-    
-    def forward(self, x, snr=10.0, target_rate=0.5, return_info=False):
-        """
-        Forward with FIS-based adaptive encoding
-        
-        Args:
-            x: (B, 3, H, W) input images
-            snr: channel SNR in dB
-            target_rate: rate budget [0, 1]
-            return_info: return intermediate info
-        
-        Returns:
-            encoded: (B, channel_num, H', W') encoded features
-            decoded: (B, 3, H, W) decoded images
-            info: dict (if return_info=True)
-        """
-        # Encode
-        encoded = self.encoder(x)  # (B, channel_num, H', W')
-        
-        # FIS processing
-        importance_map = self.fis_importance(encoded)  # (B, H', W')
-        bit_allocation = self.fis_allocation(importance_map, snr, target_rate)  # (B, H', W')
-        encoded_quantized = self.quantizer(encoded, bit_allocation)  # (B, channel_num, H', W')
-        
-        # Decode
-        decoded = self.decoder(encoded_quantized)  # (B, 3, H, W)
-        
-        if return_info:
-            info = {
-                'importance_map': importance_map,
-                'bit_allocation': bit_allocation,
-                'avg_bits': bit_allocation.float().mean().item()
-            }
-            return encoded_quantized, decoded, info
-        else:
-            return encoded_quantized, decoded
+# Legacy name used by older scripts
+JSCC_FIS = DeepJSCC_FIS

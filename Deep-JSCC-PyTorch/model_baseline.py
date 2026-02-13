@@ -8,6 +8,7 @@ Created on Tue Dec  11:00:00 2023
 import torch
 import torch.nn as nn
 from channel import Channel
+from fis_modules import FIS_ImportanceAssessment, FIS_PowerMask, apply_power_mask
 
 
 """ def _image_normalization(norm_type):
@@ -104,7 +105,7 @@ class _Encoder(nn.Module):
             return tensor
         return _inner
 
-    def forward(self, x):
+    def forward(self, x, return_pre_norm: bool = False):
         # x = self.imgae_normalization(x)
         x = self.conv1(x)
         x = self.conv2(x)
@@ -112,7 +113,12 @@ class _Encoder(nn.Module):
         x = self.conv4(x)
         if not self.is_temp:
             x = self.conv5(x)
+            if return_pre_norm:
+                return x
             x = self.norm(x)
+            return x
+        if return_pre_norm:
+            raise ValueError('return_pre_norm=True is not supported when is_temp=True')
         return x
 
 
@@ -171,6 +177,74 @@ class DeepJSCC(nn.Module):
         criterion = nn.MSELoss(reduction='mean')
         loss = criterion(prd, gt)
         return loss
+
+
+
+
+class DeepJSCC_FIS(nn.Module):
+    """
+    FIS-enhanced DeepJSCC with the SAME encoder/decoder as baseline (fair comparison).
+
+    Role of FIS:
+    - FIS computes an allocation map A(i,j) over the encoder latent feature map
+      (mask/power control), based on:
+        (i) latent-derived importance I(i,j),
+        (ii) channel SNR (dB),
+        (iii) optional rate_budget in [0,1].
+
+    Usage patterns:
+    - For training/evaluation with an external Channel module:
+        encoded, decoded_clean, info = model(x, snr_db=..., rate_budget=..., return_info=True)
+        encoded_noisy = channel(encoded)
+        decoded = model.decoder(encoded_noisy)
+
+    Notes:
+    - FIS modules are fixed (not trained).
+    - Encoder/decoder are trainable as in baseline.
+    """
+
+    def __init__(self, c, snr_db: float = 10.0, rate_budget: float = 1.0, P: float = 1.0):
+        super().__init__()
+        self.encoder = _Encoder(c=c, P=P)
+        self.decoder = _Decoder(c=c)
+
+        self.fis_importance = FIS_ImportanceAssessment()
+        self.fis_alloc = FIS_PowerMask()
+
+        # default conditions (can be overridden per forward call)
+        self.default_snr_db = float(snr_db)
+        self.default_rate_budget = float(rate_budget)
+
+    def forward(self, x, snr_db: float = None, rate_budget: float = None, return_info: bool = False):
+        if snr_db is None:
+            snr_db = self.default_snr_db
+        if rate_budget is None:
+            rate_budget = self.default_rate_budget
+
+        # Pre-normalization latent (so FIS sees content-dependent variations)
+        z_pre = self.encoder(x, return_pre_norm=True)  # (B,2c,H',W')
+        I, info_I = self.fis_importance(z_pre)         # (B,H',W')
+        A, info_A = self.fis_alloc(I, snr_db=snr_db, rate_budget=rate_budget)
+
+        # Apply mask/power and then normalize to meet average power constraint (same as baseline)
+        z_mask = apply_power_mask(z_pre, A)
+        z = self.encoder.norm(z_mask)
+
+        # "clean" reconstruction (no channel) is sometimes useful for debugging
+        x_hat_clean = self.decoder(z)
+
+        if not return_info:
+            return z, x_hat_clean
+
+        info = {
+            "snr_db": float(snr_db),
+            "rate_budget": float(rate_budget),
+            "I": I.detach(),
+            "A": A.detach(),
+            "I_stats": info_I,
+            "A_stats": info_A,
+        }
+        return z, x_hat_clean, info
 
 
 if __name__ == '__main__':

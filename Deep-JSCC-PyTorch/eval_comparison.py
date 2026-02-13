@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from model import JSCC_FIS
+# from model import JSCC_FIS  # (old)
+from model_baseline import DeepJSCC_FIS
 from model_baseline import DeepJSCC
 from channel import Channel
 from utils import get_psnr
@@ -109,8 +110,8 @@ def evaluate_model(model, test_loader, snr_list, channel_type, args):
                 else:
                     encoded, decoded, info = model(
                         images,
-                        snr=snr,
-                        target_rate=args.target_rate,
+                        snr_db=snr,
+                        rate_budget=args.target_rate,
                         return_info=True
                     )
 

@@ -14,7 +14,8 @@ import argparse
 import os
 from datetime import datetime
 
-from model import JSCC_FIS
+# from model import JSCC_FIS  # (old)
+from model_baseline import DeepJSCC_FIS
 from channel import Channel
 from dataset import Vanilla
 from utils import get_psnr, set_seed
@@ -28,7 +29,7 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
 
     total_loss = 0
     total_psnr = 0
-    total_bits = 0
+    total_alloc = 0
     total_samples = 0
 
     for batch_idx, (images, _) in enumerate(train_loader):
@@ -59,11 +60,11 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
         # Metrics
         batch_size = images.size(0)
         psnr = get_psnr(decoded_noisy * 255.0, images * 255.0)
-        avg_bits = info["avg_bits"]
+        avg_A = info["A_stats"]["A_mean"]
 
         total_loss += loss.item() * batch_size
         total_psnr += psnr.item() * batch_size
-        total_bits += avg_bits * batch_size
+        total_alloc += avg_A * batch_size
         total_samples += batch_size
 
         if batch_idx % args.log_interval == 0:
@@ -71,16 +72,16 @@ def train_one_epoch(model, train_loader, channel, optimizer, criterion, epoch, a
                 f'Epoch [{epoch}][{batch_idx}/{len(train_loader)}] '
                 f'Loss: {total_loss/total_samples:.4f} '
                 f'PSNR: {total_psnr/total_samples:.2f} '
-                f'Bits: {total_bits/total_samples:.2f}'
+                f'AvgA: {total_alloc/total_samples:.3f}'
             )
 
     avg_loss = total_loss / total_samples
     avg_psnr = total_psnr / total_samples
-    avg_bits = total_bits / total_samples
+    avg_A = total_alloc / total_samples
 
     writer.add_scalar('Train/Loss', avg_loss, epoch)
     writer.add_scalar('Train/PSNR', avg_psnr, epoch)
-    writer.add_scalar('Train/AvgBits', avg_bits, epoch)
+    writer.add_scalar('Train/AvgA', avg_A, epoch)
 
     return avg_loss, avg_psnr
 
@@ -93,7 +94,7 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
 
     total_loss = 0
     total_psnr = 0
-    total_bits = 0
+    total_alloc = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -113,26 +114,26 @@ def validate(model, val_loader, channel, criterion, epoch, args, writer):
 
             batch_size = images.size(0)
             psnr = get_psnr(decoded_noisy * 255.0, images * 255.0)
-            avg_bits = info["avg_bits"]
+            avg_A = info["A_stats"]["A_mean"]
 
             total_loss += loss.item() * batch_size
             total_psnr += psnr.item() * batch_size
-            total_bits += avg_bits * batch_size
+            total_alloc += avg_A * batch_size
             total_samples += batch_size
 
     avg_loss = total_loss / total_samples
     avg_psnr = total_psnr / total_samples
-    avg_bits = total_bits / total_samples
+    avg_A = total_alloc / total_samples
 
     print(
         f'Validation - Loss: {avg_loss:.4f} '
         f'PSNR: {avg_psnr:.2f} '
-        f'Bits: {avg_bits:.2f}'
+        f'AvgA: {avg_A:.3f}'
     )
 
     writer.add_scalar('Val/Loss', avg_loss, epoch)
     writer.add_scalar('Val/PSNR', avg_psnr, epoch)
-    writer.add_scalar('Val/AvgBits', avg_bits, epoch)
+    writer.add_scalar('Val/AvgA', avg_A, epoch)
 
     return avg_loss, avg_psnr
 
@@ -234,7 +235,7 @@ def main():
 
     writer = SummaryWriter(log_path)
 
-    model = JSCC_FIS(C=args.C, channel_num=args.channel_num).cuda()
+    model = DeepJSCC_FIS(c=args.C, snr_db=args.snr, rate_budget=args.target_rate).cuda()
     channel = Channel(channel_type=args.channel_type, snr=args.snr).cuda()
 
     train_loader, val_loader = get_dataset(args.dataset, args.batch_size)
